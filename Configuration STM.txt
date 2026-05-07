@@ -1,0 +1,96 @@
+STM32CubeMX Configuration Summary
+
+Board / MCU:
+[✓] Board/MCU: STM32 Nucleo-L432KC / STM32L432KC
+[✓] Toolchain target: MDK-ARM / Keil
+[✓] SYSCLK = 32 MHz
+
+System Core:
+[✓] Debug = Serial Wire
+[✓] SYS Timebase Source = TIM is the full configuration summary you can send to your friend:
+
+```text id="h4qmtl"
+STM32CubeMX Configuration6
+
+TIM1 Servo PWM Configuration:
+[✓] TIM1 clock = 32 MHz
+[✓] TIM1_CH1 = PA8
+[✓] TIM1_CH2 = PA9
+[✓] TIM1 Prescaler = 31
+[✓] TIM1 Counter Mode = Up
+[✓] TIM1 ARR / Counter Period = 19999
+[✓] TIM1 CH1 Mode = PWM mode 1
+[✓] TIM1 CH2 Mode = PWM mode 1
+[✓] TIM1 CH1 Pulse = 1500
+[✓] TIM1 CH2 Pulse = 1500
+[✓] TIM1 CH1 Polarity = High
+[✓] TIM1 CH2 Polarity = High
+[✓] Output Compare Preload = Enable
+[✓] Fast Mode = Disable
+
+PWM Meaning:
+- 32 MHz / (31 + 1) = 1 MHz timer counter
+- 1 timer count = 1 microsecond
+- ARR 19999 gives 20,000 counts
+- 20,000 us = 20 ms period
+- 20 ms period = 50 Hz servo PWM
+- Pulse 1500 = 1500 us = servo center position
+
+Servo Pin Mapping:
+[✓] PA8  → TIM1_CH1 → SG90 Servo 1 / Azimuth
+[✓] PA9  → TIM1_CH2 → SG90 Servo 2 / Elevation
+
+USART1 GPS Configuration:
+[✓] USART1 enabled in Asynchronous mode
+[✓] USART1_RX = PA10
+[✓] USART1_TX = PB6
+[✓] USART1 baud rate = 9600
+[✓] Word Length = 8 bits
+[✓] Parity = None
+[✓] Stop Bits = 1
+[✓] Hardware Flow Control = Disabled
+[✓] USART1 interrupt enabled
+
+GPS Pin Mapping:
+[✓] NEO-7M GPS TX → PA10 / USART1_RX
+[✓] NEO-7M GPS RX → PB6 / USART1_TX
+[✓] NEO-7M GPS GND → STM32 GND
+[✓] NEO-7M GPS VCC → proper GPS module supply voltage
+
+FreeRTOS Configuration:
+[✓] FreeRTOS enabled
+[✓] Interface = CMSIS_V2
+[✓] Heap size increased to 15360 or 20480
+[✓] USE_PREEMPTION = Enabled
+[✓] USE_IDLE_HOOK = Disabled
+[✓] USE_TICK_HOOK = Disabled
+
+Configured RTOS Tasks:
+[✓] servoTask
+    Entry Function: StartServoTask
+    Priority: Normal
+    Stack Size: 128 words
+
+[✓] gpsTask
+    Entry Function: StartGpsTask
+    Priority: Above Normal
+    Stack Size: 128 words
+
+[✓] solarTask
+    Entry Function: StartSolarTask
+    Priority: Below Normal
+    Stack Size: 256 words
+
+Configured RTOS Queues:
+[✓] gpsRxQueue
+    Queue Size: 32 items
+    Item Size: uint8_t
+    Purpose: stores incoming GPS UART bytes before the GPS task builds NMEA sentences
+
+Current System Purpose:
+- TIM1 generates two 50 Hz PWM signals for two SG90 servos.
+- USART1 receives GPS data from the NEO-7M module.
+- FreeRTOS separates the project into servo control, GPS reading, and solar position calculation tasks.
+- GPS data should be processed by gpsTask.
+- Solar position calculations should be processed by solarTask.
+- Servo movement should be handled only by servoTask.
