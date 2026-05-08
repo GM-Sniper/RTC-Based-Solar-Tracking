@@ -6,15 +6,20 @@
 extern void Servo_Task(void *pvParameter);
 // RTC task implemented in rtc.c
 extern void rtc_task(void *pvParameter);
+// Solar task implemented in solar.c
+extern void solar_task(void *pvParameter);
 
 #define TAG "MAIN"
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Starting application and creating Servo task...");
+    // ESP_LOGI(TAG, "Starting application and creating Servo task...");
     // Create the servo control task implemented in servo.c
-    xTaskCreate(Servo_Task, "Servo_Task", 4096, NULL, 5, NULL);
+    // xTaskCreate(Servo_Task, "Servo_Task", 4096, NULL, 5, NULL);
     // Create RTC task that syncs SNTP and logs DS3231 every second
-    xTaskCreate(rtc_task, "RTC_Task", 8192, NULL, 5, NULL);
+    // xTaskCreate(rtc_task, "RTC_Task", 8192, NULL, 5, NULL);
+    //  ESP_LOGI(TAG, "Starting application and creating Solar task...");
+    // Solar task reads RTC and computes solar elevation target each second.
+    xTaskCreate(solar_task, "Solar_Task", 8192, NULL, 5, NULL);
     // app_main returns; FreeRTOS keeps running tasks.
 }

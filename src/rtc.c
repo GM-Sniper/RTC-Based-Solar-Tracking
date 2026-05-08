@@ -3,26 +3,9 @@
 #include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/event_groups.h"
-#include "esp_system.h"
-#include "nvs_flash.h"
 #include "esp_log.h"
-#include "esp_event.h"
-#include "esp_netif.h"
-#include "esp_wifi.h"
-#include "protocol_examples_common.h"
-#include "lwip/err.h"
-#include "lwip/sys.h"
 #include "driver/i2c.h"
-#include "lwip/apps/sntp.h"
-
-// --- Configuration: update these to match your Wi-Fi ---
-#ifndef WIFI_SSID
-#define WIFI_SSID "your-ssid"
-#endif
-#ifndef WIFI_PASS
-#define WIFI_PASS "your-password"
-#endif
+#include "rtc.h"
 
 #define TAG "RTC"
 
@@ -35,9 +18,6 @@
 #define I2C_MASTER_RX_BUF_DISABLE 0
 
 #define DS3231_ADDR 0x68
-
-static EventGroupHandle_t s_wifi_event_group;
-#define WIFI_CONNECTED_BIT BIT0
 
 static void initialize_i2c(void)
 {
@@ -63,17 +43,18 @@ static int bcd_to_dec(uint8_t val)
     return ((val >> 4) * 10) + (val & 0x0F);
 }
 
-static esp_err_t ds3231_set_time(struct tm *tm)
+static esp_err_t ds3231_set_time_internal(const struct tm *tm)
 {
+    struct tm local_tm = *tm;
     uint8_t data[8];
     data[0] = 0x00; // start register
-    data[1] = dec_to_bcd(tm->tm_sec);
-    data[2] = dec_to_bcd(tm->tm_min);
-    data[3] = dec_to_bcd(tm->tm_hour);
-    data[4] = dec_to_bcd(tm->tm_wday + 1); // DS3231: 1 = Sunday
-    data[5] = dec_to_bcd(tm->tm_mday);
-    data[6] = dec_to_bcd(tm->tm_mon + 1);
-    data[7] = dec_to_bcd((tm->tm_year + 1900) % 100);
+    data[1] = dec_to_bcd(local_tm.tm_sec);
+    data[2] = dec_to_bcd(local_tm.tm_min);
+    data[3] = dec_to_bcd(local_tm.tm_hour);
+    data[4] = dec_to_bcd(local_tm.tm_wday + 1); // DS3231: 1 = Sunday
+    data[5] = dec_to_bcd(local_tm.tm_mday);
+    data[6] = dec_to_bcd(local_tm.tm_mon + 1);
+    data[7] = dec_to_bcd((local_tm.tm_year + 1900) % 100);
 
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
     i2c_master_start(cmd);
@@ -113,96 +94,52 @@ static esp_err_t ds3231_read_time(struct tm *tm)
     return ret;
 }
 
-// WiFi event handler
-static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+esp_err_t rtc_init_ds3231(void)
 {
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START)
-    {
-        esp_wifi_connect();
-    }
-    else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
-    {
-        xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-        esp_wifi_connect();
-    }
-    else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
-    {
-        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-    }
+    initialize_i2c();
+    return ESP_OK;
 }
 
-static void initialise_wifi(void)
+esp_err_t rtc_set_time(const struct tm *tm)
 {
-    s_wifi_event_group = xEventGroupCreate();
-    esp_netif_init();
-    esp_event_loop_create_default();
-    esp_netif_create_default_wifi_sta();
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_init(&cfg);
-    esp_event_handler_instance_t instance_any_id;
-    esp_event_handler_instance_t instance_got_ip;
-    esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, &instance_any_id);
-    esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, &instance_got_ip);
+    if (tm == NULL)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return ds3231_set_time_internal(tm);
+}
 
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = WIFI_SSID,
-            .password = WIFI_PASS,
-            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
-        },
+esp_err_t rtc_get_time(struct tm *tm)
+{
+    if (tm == NULL)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return ds3231_read_time(tm);
+}
+
+esp_err_t rtc_set_demo_time(void)
+{
+    struct tm init_time = {
+        .tm_sec = 45,
+        .tm_min = 23,
+        .tm_hour = 10,
+        .tm_mday = 2,
+        .tm_mon = 4,    // May (0-11, so 4 = May)
+        .tm_year = 126, // 2026 (years since 1900)
+        .tm_wday = 5,   // Friday (0-6, 0 = Sunday)
     };
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config);
-    esp_wifi_start();
-    ESP_LOGI(TAG, "Connecting to Wi-Fi SSID:%s", WIFI_SSID);
-    xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
-    ESP_LOGI(TAG, "Wi-Fi connected");
-}
-
-static void obtain_time(void)
-{
-    ESP_LOGI(TAG, "Initializing SNTP");
-    sntp_setoperatingmode(SNTP_OPMODE_POLL);
-    sntp_setservername(0, "pool.ntp.org");
-    sntp_init();
-
-    // wait for time to be set
-    int retry = 0;
-    const int retry_count = 10;
-    while (sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET && ++retry < retry_count)
-    {
-        ESP_LOGI(TAG, "Waiting for system time to be set... (%d/%d)", retry, retry_count);
-        vTaskDelay(pdMS_TO_TICKS(2000));
-    }
-    time_t now = 0;
-    struct tm timeinfo = {0};
-    time(&now);
-    localtime_r(&now, &timeinfo);
-    ESP_LOGI(TAG, "System time is: %s", asctime(&timeinfo));
+    return ds3231_set_time_internal(&init_time);
 }
 
 void rtc_task(void *pvParameter)
 {
-    // initialize NVS (required by Wi-Fi)
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    ESP_LOGI(TAG, "Initializing I2C and DS3231...");
+    rtc_init_ds3231();
+
+    if (rtc_set_demo_time() == ESP_OK)
     {
-        nvs_flash_erase();
-        nvs_flash_init();
-    }
-
-    initialise_wifi();
-    obtain_time();
-
-    initialize_i2c();
-
-    // After SNTP sync, set DS3231
-    time_t now = time(NULL);
-    struct tm timeinfo;
-    localtime_r(&now, &timeinfo);
-    if (ds3231_set_time(&timeinfo) == ESP_OK)
-    {
-        ESP_LOGI(TAG, "DS3231 time set from SNTP: %s", asctime(&timeinfo));
+        ESP_LOGI(TAG, "DS3231 time initialized to: 2026-05-02 14:30:45");
     }
     else
     {
@@ -213,7 +150,7 @@ void rtc_task(void *pvParameter)
     while (1)
     {
         struct tm rtc_tm = {0};
-        if (ds3231_read_time(&rtc_tm) == ESP_OK)
+        if (rtc_get_time(&rtc_tm) == ESP_OK)
         {
             char buf[64];
             snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
