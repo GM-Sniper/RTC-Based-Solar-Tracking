@@ -9,20 +9,20 @@
 /* External UART Handles (defined in main.c) */
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart2;
+extern osMessageQueueId_t gpsRxQueueHandle;
 
 /* ============= Configuration ============= */
-#define GPS_RX_BUFFER_SIZE 512
 #define GPS_LINE_BUFFER_SIZE 128
 #define GPS_UART huart1
 #define DEBUG_UART huart2
 
 /* ============= Private Variables ============= */
 static gps_data_t gps_data = {0};
-static uint8_t gps_rx_buffer[GPS_RX_BUFFER_SIZE] = {0};
 static uint8_t gps_line_buffer[GPS_LINE_BUFFER_SIZE] = {0};
-static volatile uint16_t rx_head = 0;
-static uint16_t rx_tail = 0;
 static uint8_t uart_rx_byte = 0;
+
+/* RX Drop Counter - incremented when queue full */
+volatile uint32_t gps_rx_drop_count = 0;
 
 /* ============= Forward Declarations ============= */
 static char *next_token(char **str_ptr);
@@ -36,14 +36,12 @@ static bool parse_utc_date(const char *date_str);
 /* ============= Public Functions ============= */
 
 /**
- * @brief Initialize GPS module (start UART1 DMA receive)
+ * @brief Initialize GPS module (start UART1 interrupt receive)
  */
 void GPS_Init(void)
 {
     memset(&gps_data, 0, sizeof(gps_data_t));
-    memset(gps_rx_buffer, 0, GPS_RX_BUFFER_SIZE);
-    rx_head = 0;
-    rx_tail = 0;
+    gps_rx_drop_count = 0;
 
     // Start IT reception byte by byte
     HAL_UART_Receive_IT(&GPS_UART, &uart_rx_byte, 1);
@@ -55,74 +53,90 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART1)
     {
-        gps_rx_buffer[rx_head] = uart_rx_byte;
-        rx_head = (rx_head + 1) % GPS_RX_BUFFER_SIZE;
+        // Try to enqueue byte to message queue
+        osStatus_t status = osMessageQueuePut(gpsRxQueueHandle, &uart_rx_byte, 0, 0);
+        
+        if (status != osOK)
+        {
+            // Queue full - increment drop counter
+            gps_rx_drop_count++;
+        }
+        
+        // Re-arm receiver for next byte
         HAL_UART_Receive_IT(&GPS_UART, &uart_rx_byte, 1);
     }
 }
 
 /**
- * @brief Process incoming GPS data from DMA buffer (call from GPS_Task)
- * Parses complete sentences from the circular DMA buffer
+ * @brief Process one character from the GPS queue and build sentences
  */
-void GPS_ProcessBuffer(void)
+void GPS_ProcessChar(uint8_t c)
 {
-    // Scan from rx_tail to rx_head for complete lines
     static bool found_start = false;
     static uint16_t len = 0;
 
-    while (rx_tail != rx_head)
+    // Look for start of sentence
+    if (c == '$')
     {
-        uint8_t c = gps_rx_buffer[rx_tail];
-        rx_tail = (rx_tail + 1) % GPS_RX_BUFFER_SIZE;
+        found_start = true;
+        len = 0;
+        memset(gps_line_buffer, 0, GPS_LINE_BUFFER_SIZE);
+    }
 
-        // Look for start of sentence
-        if (c == '$')
+    if (found_start)
+    {
+        if (len < GPS_LINE_BUFFER_SIZE - 1)
         {
-            found_start = true;
+            gps_line_buffer[len++] = c;
+        }
+
+        // Look for end of line
+        if (c == '\n')
+        {
+            gps_line_buffer[len] = '\0';
+
+            // Process the complete sentence
+            const char *sentence = (const char *)gps_line_buffer;
+
+            // Print raw for debugging
+            GPS_DebugPrint("RAW: %s", sentence);
+
+            // Parse based on sentence type
+            if (strncmp(sentence, "$GPRMC", 6) == 0 || strncmp(sentence, "$GNRMC", 6) == 0)
+            {
+                if (parse_nmea_rmc(sentence))
+                {
+                    gps_data.new_data = true;
+                }
+            }
+            else if (strncmp(sentence, "$GPGGA", 6) == 0 || strncmp(sentence, "$GNGGA", 6) == 0)
+            {
+                if (parse_nmea_gga(sentence))
+                {
+                    // GGA data updated
+                }
+            }
+
+            // Reset for next sentence
+            found_start = false;
             len = 0;
-            memset(gps_line_buffer, 0, GPS_LINE_BUFFER_SIZE);
         }
+    }
+}
 
-        if (found_start)
-        {
-            if (len < GPS_LINE_BUFFER_SIZE - 1)
-            {
-                gps_line_buffer[len++] = c;
-            }
+/**
+ * @brief Process incoming GPS data from RTOS queue
+ * Dequeues bytes from the message queue and processes them
+ */
+void GPS_ProcessBuffer(void)
+{
+    uint8_t rx_byte;
+    osStatus_t status;
 
-            // Look for end of line
-            if (c == '\n')
-            {
-                gps_line_buffer[len] = '\0';
-
-                // Process the complete sentence
-                const char *sentence = (const char *)gps_line_buffer;
-
-                // Print raw for debugging
-                GPS_DebugPrint("RAW: %s", sentence);
-
-                // Parse based on sentence type
-                if (strncmp(sentence, "$GPRMC", 6) == 0 || strncmp(sentence, "$GNRMC", 6) == 0)
-                {
-                    if (parse_nmea_rmc(sentence))
-                    {
-                        gps_data.new_data = true;
-                    }
-                }
-                else if (strncmp(sentence, "$GPGGA", 6) == 0 || strncmp(sentence, "$GNGGA", 6) == 0)
-                {
-                    if (parse_nmea_gga(sentence))
-                    {
-                        // GGA data updated
-                    }
-                }
-
-                // Reset for next sentence
-                found_start = false;
-                len = 0;
-            }
-        }
+    // Dequeue all available bytes from the queue
+    while ((status = osMessageQueueGet(gpsRxQueueHandle, &rx_byte, NULL, 0)) == osOK)
+    {
+        GPS_ProcessChar(rx_byte);
     }
 }
 
@@ -158,6 +172,7 @@ void GPS_PrintStatus(void)
     GPS_DebugPrint("Altitude: %.1f m\r\n", gps_data.altitude);
     GPS_DebugPrint("Speed: %.1f knots\r\n", gps_data.speed_knots);
     GPS_DebugPrint("Course: %.1f degrees\r\n", gps_data.course);
+    GPS_DebugPrint("RX Queue Drops: %lu\r\n", gps_rx_drop_count);
     GPS_DebugPrint("================================\r\n\r\n");
 }
 
@@ -481,19 +496,3 @@ static float parse_coordinate(const char *coord_str, char direction)
 
     return decimal;
 }
-
-/* ============= HAL Callback (Interrupt Handler) ============= */
-/**
- * @brief UART RX Complete Callback
- * Add this to main.c in the HAL_UART_RxCpltCallback function:
- *
- * extern uint8_t gps_rx_char;
- *
- * void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
- * {
- *     if (huart->Instance == USART1) {
- *         GPS_ProcessChar(gps_rx_char);
- *         HAL_UART_Receive_IT(&GPS_UART, &gps_rx_char, 1);
- *     }
- * }
- */
