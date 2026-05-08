@@ -15,6 +15,9 @@ extern UART_HandleTypeDef huart2;
 #define GPS_LINE_BUFFER_SIZE  128
 #define GPS_UART              huart1
 #define DEBUG_UART            huart2
+#define GPS_VERBOSE_SENTENCE_LOG 0
+
+extern volatile uint32_t gps_rx_drop_count;
 
 /* ============= Private Variables ============= */
 static gps_data_t gps_data = {0};
@@ -77,17 +80,21 @@ void GPS_ProcessChar(uint8_t c)
         if (strncmp(sentence, "$GPRMC", 6) == 0) {
             if (parse_nmea_rmc(sentence)) {
                 gps_data.new_data = true;
+#if GPS_VERBOSE_SENTENCE_LOG
                 GPS_DebugPrint("[RMC] Parsed: %02d/%02d/%04d %02d:%02d:%02d Lat=%.6f Lon=%.6f Valid=%d\r\n", 
                     gps_data.utc_day, gps_data.utc_month, gps_data.utc_year,
                     gps_data.utc_hour, gps_data.utc_minute, gps_data.utc_second,
                     gps_data.latitude, gps_data.longitude, gps_data.valid_fix);
+#endif
             }
         } 
         else if (strncmp(sentence, "$GPGGA", 6) == 0) {
             if (parse_nmea_gga(sentence)) {
+#if GPS_VERBOSE_SENTENCE_LOG
                 GPS_DebugPrint("[GGA] Parsed: Sats=%d Fix=%d Alt=%.1f HDOP=%.1f\r\n", 
                     gps_data.satellites, gps_data.fix_quality, 
                     gps_data.altitude, gps_data.hdop);
+#endif
             }
         }
         
@@ -128,6 +135,7 @@ void GPS_PrintStatus(void)
     GPS_DebugPrint("Altitude: %.1f m\r\n", gps_data.altitude);
     GPS_DebugPrint("Speed: %.1f knots\r\n", gps_data.speed_knots);
     GPS_DebugPrint("Course: %.1f degrees\r\n", gps_data.course);
+    GPS_DebugPrint("RX Queue Drops: %lu\r\n", (unsigned long)gps_rx_drop_count);
     GPS_DebugPrint("================================\r\n\r\n");
 }
 

@@ -81,6 +81,7 @@ const osMessageQueueAttr_t gpsRxQueue_attributes = {
   .name = "gpsRxQueue"
 };
 /* USER CODE BEGIN PV */
+volatile uint32_t gps_rx_drop_count = 0;
 
 /* USER CODE END PV */
 
@@ -563,7 +564,11 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   if (huart->Instance == USART1)
   {
     if (gpsRxQueueHandle != NULL) {
-      (void)osMessageQueuePut(gpsRxQueueHandle, &gps_rx_char, 0, 0);
+      if (osMessageQueuePut(gpsRxQueueHandle, &gps_rx_char, 0, 0) != osOK) {
+        gps_rx_drop_count++;
+      }
+    } else {
+      gps_rx_drop_count++;
     }
 
     /* Restart UART receive (non-blocking interrupt) */
