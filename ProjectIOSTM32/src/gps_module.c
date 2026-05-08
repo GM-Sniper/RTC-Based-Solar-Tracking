@@ -11,7 +11,7 @@ extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart2;
 
 /* ============= Configuration ============= */
-#define GPS_RX_BUFFER_SIZE 256
+#define GPS_RX_BUFFER_SIZE 512
 #define GPS_LINE_BUFFER_SIZE 128
 #define GPS_UART huart1
 #define DEBUG_UART huart2
@@ -20,13 +20,12 @@ extern UART_HandleTypeDef huart2;
 static gps_data_t gps_data = {0};
 static uint8_t gps_rx_buffer[GPS_RX_BUFFER_SIZE] = {0};
 static uint8_t gps_line_buffer[GPS_LINE_BUFFER_SIZE] = {0};
-static uint16_t rx_index = 0;
-static uint16_t line_index = 0;
-
-/* External variable for HAL callback (accessed by HAL_UART_Receive_IT) */
-uint8_t gps_rx_char = 0;
+static volatile uint16_t rx_head = 0;
+static uint16_t rx_tail = 0;
+static uint8_t uart_rx_byte = 0;
 
 /* ============= Forward Declarations ============= */
+static char *next_token(char **str_ptr);
 static bool parse_nmea_rmc(const char *sentence);
 static bool parse_nmea_gga(const char *sentence);
 static bool validate_checksum(const char *sentence);
@@ -37,71 +36,93 @@ static bool parse_utc_date(const char *date_str);
 /* ============= Public Functions ============= */
 
 /**
- * @brief Initialize GPS module (start UART1 receive interrupt)
+ * @brief Initialize GPS module (start UART1 DMA receive)
  */
 void GPS_Init(void)
 {
     memset(&gps_data, 0, sizeof(gps_data_t));
     memset(gps_rx_buffer, 0, GPS_RX_BUFFER_SIZE);
-    memset(gps_line_buffer, 0, GPS_LINE_BUFFER_SIZE);
-    rx_index = 0;
-    line_index = 0;
+    rx_head = 0;
+    rx_tail = 0;
 
-    // Enable UART1 interrupt receiver
-    HAL_UART_Receive_IT(&GPS_UART, &gps_rx_char, 1);
+    // Start IT reception byte by byte
+    HAL_UART_Receive_IT(&GPS_UART, &uart_rx_byte, 1);
 
-    GPS_DebugPrint("\r\n[GPS] Initialized on UART1 (9600 baud)\r\n");
+    GPS_DebugPrint("\r\n[GPS] Initialized on UART1 with Interrupt (9600 baud)\r\n");
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART1)
+    {
+        gps_rx_buffer[rx_head] = uart_rx_byte;
+        rx_head = (rx_head + 1) % GPS_RX_BUFFER_SIZE;
+        HAL_UART_Receive_IT(&GPS_UART, &uart_rx_byte, 1);
+    }
 }
 
 /**
- * @brief Process incoming GPS character (call from UART1 IRQ)
- * Note: This is called automatically via HAL_UART_RxCpltCallback
+ * @brief Process incoming GPS data from DMA buffer (call from GPS_Task)
+ * Parses complete sentences from the circular DMA buffer
  */
-void GPS_ProcessChar(uint8_t c)
+void GPS_ProcessBuffer(void)
 {
-    // Store character in line buffer
-    if (line_index < GPS_LINE_BUFFER_SIZE - 1)
+    // Scan from rx_tail to rx_head for complete lines
+    static bool found_start = false;
+    static uint16_t len = 0;
+
+    while (rx_tail != rx_head)
     {
-        gps_line_buffer[line_index++] = c;
-    }
+        uint8_t c = gps_rx_buffer[rx_tail];
+        rx_tail = (rx_tail + 1) % GPS_RX_BUFFER_SIZE;
 
-    // Check for end of line (LF after CR)
-    if (c == '\n' && line_index > 1 && gps_line_buffer[line_index - 2] == '\r')
-    {
-        // Null-terminate
-        gps_line_buffer[line_index] = '\0';
-
-        // Process complete NMEA sentence
-        const char *sentence = (const char *)gps_line_buffer;
-
-        // Print raw sentence for debugging
-        GPS_DebugPrint("RAW: %s\r\n", sentence);
-
-        // Parse based on sentence type (GPRMC or GNRMC)
-        if (strncmp(sentence, "$GPRMC", 6) == 0 || strncmp(sentence, "$GNRMC", 6) == 0)
+        // Look for start of sentence
+        if (c == '$')
         {
-            if (parse_nmea_rmc(sentence))
-            {
-                gps_data.new_data = true;
-                GPS_DebugPrint("[RMC] Parsed: %02d/%02d/%04d %02d:%02d:%02d Lat=%.6f Lon=%.6f Valid=%d\r\n",
-                               gps_data.utc_day, gps_data.utc_month, gps_data.utc_year,
-                               gps_data.utc_hour, gps_data.utc_minute, gps_data.utc_second,
-                               gps_data.latitude, gps_data.longitude, gps_data.valid_fix);
-            }
-        }
-        else if (strncmp(sentence, "$GPGGA", 6) == 0 || strncmp(sentence, "$GNGGA", 6) == 0)
-        {
-            if (parse_nmea_gga(sentence))
-            {
-                GPS_DebugPrint("[GGA] Parsed: Sats=%d Fix=%d Alt=%.1f HDOP=%.1f\r\n",
-                               gps_data.satellites, gps_data.fix_quality,
-                               gps_data.altitude, gps_data.hdop);
-            }
+            found_start = true;
+            len = 0;
+            memset(gps_line_buffer, 0, GPS_LINE_BUFFER_SIZE);
         }
 
-        // Reset line buffer
-        line_index = 0;
-        memset(gps_line_buffer, 0, GPS_LINE_BUFFER_SIZE);
+        if (found_start)
+        {
+            if (len < GPS_LINE_BUFFER_SIZE - 1)
+            {
+                gps_line_buffer[len++] = c;
+            }
+
+            // Look for end of line
+            if (c == '\n')
+            {
+                gps_line_buffer[len] = '\0';
+
+                // Process the complete sentence
+                const char *sentence = (const char *)gps_line_buffer;
+
+                // Print raw for debugging
+                GPS_DebugPrint("RAW: %s", sentence);
+
+                // Parse based on sentence type
+                if (strncmp(sentence, "$GPRMC", 6) == 0 || strncmp(sentence, "$GNRMC", 6) == 0)
+                {
+                    if (parse_nmea_rmc(sentence))
+                    {
+                        gps_data.new_data = true;
+                    }
+                }
+                else if (strncmp(sentence, "$GPGGA", 6) == 0 || strncmp(sentence, "$GNGGA", 6) == 0)
+                {
+                    if (parse_nmea_gga(sentence))
+                    {
+                        // GGA data updated
+                    }
+                }
+
+                // Reset for next sentence
+                found_start = false;
+                len = 0;
+            }
+        }
     }
 }
 
@@ -156,12 +177,15 @@ void GPS_DebugPrint(const char *format, ...)
 
 /**
  * @brief GPS Task (call from RTOS GPS task)
- * Periodically logs status for monitoring
+ * Periodically processes DMA buffer and logs status for monitoring
  */
 void GPS_Task(void)
 {
     static uint32_t last_print = 0;
     uint32_t current_tick = HAL_GetTick();
+
+    // Process incoming DMA data continuously
+    GPS_ProcessBuffer();
 
     // Print status every 5 seconds
     if ((current_tick - last_print) > 5000)
@@ -170,10 +194,34 @@ void GPS_Task(void)
         last_print = current_tick;
     }
 
-    osDelay(100); // Yield to other tasks
+    osDelay(10); // Yield to other tasks
 }
 
 /* ============= Private Functions ============= */
+
+/**
+ * @brief Get next token from a comma-separated string, keeping empty tokens
+ */
+static char *next_token(char **str_ptr)
+{
+    if (!str_ptr || !*str_ptr)
+        return NULL;
+
+    char *token = *str_ptr;
+    char *comma = strchr(token, ',');
+
+    if (comma)
+    {
+        *comma = '\0';
+        *str_ptr = comma + 1;
+    }
+    else
+    {
+        *str_ptr = NULL;
+    }
+
+    return token;
+}
 
 /**
  * @brief Parse GPRMC sentence (Recommended Minimum Navigation Information)
@@ -195,54 +243,56 @@ static bool parse_nmea_rmc(const char *sentence)
     if (checksum_pos)
         *checksum_pos = '\0';
 
+    char *ptr = line;
+
     // Parse fields
-    char *token = strtok(line, ",");
+    char *token = next_token(&ptr);
     if (!token)
         return false; // $GPRMC
 
-    token = strtok(NULL, ",");
+    token = next_token(&ptr);
     if (!token)
         return false;
     parse_utc_time(token); // hhmmss.ss
 
-    token = strtok(NULL, ",");
+    token = next_token(&ptr);
     if (!token)
         return false;
     gps_data.valid_fix = (token[0] == 'A'); // A=valid, V=invalid
 
-    token = strtok(NULL, ",");
+    token = next_token(&ptr);
     if (!token)
         return false;
     char lat_str[16];
     strncpy(lat_str, token, 15);
 
-    token = strtok(NULL, ",");
+    token = next_token(&ptr);
     if (!token)
         return false;
     char lat_dir = token[0];
 
-    token = strtok(NULL, ",");
+    token = next_token(&ptr);
     if (!token)
         return false;
     char lon_str[16];
     strncpy(lon_str, token, 15);
 
-    token = strtok(NULL, ",");
+    token = next_token(&ptr);
     if (!token)
         return false;
     char lon_dir = token[0];
 
-    token = strtok(NULL, ",");
+    token = next_token(&ptr);
     if (!token)
         return false;
     gps_data.speed_knots = atof(token); // Speed in knots
 
-    token = strtok(NULL, ",");
+    token = next_token(&ptr);
     if (!token)
         return false;
     gps_data.course = atof(token); // Course over ground
 
-    token = strtok(NULL, ",");
+    token = next_token(&ptr);
     if (!token)
         return false;
     parse_utc_date(token); // Date in ddmmyy format
@@ -274,47 +324,49 @@ static bool parse_nmea_gga(const char *sentence)
     if (checksum_pos)
         *checksum_pos = '\0';
 
+    char *ptr = line;
+
     // Parse fields
-    char *token = strtok(line, ",");
+    char *token = next_token(&ptr);
     if (!token)
         return false; // $GPGGA
 
-    token = strtok(NULL, ",");
+    token = next_token(&ptr);
     if (!token)
         return false; // Time (skip, already from RMC)
 
-    token = strtok(NULL, ",");
+    token = next_token(&ptr);
     if (!token)
         return false; // Latitude (skip)
 
-    token = strtok(NULL, ",");
+    token = next_token(&ptr);
     if (!token)
         return false; // Lat direction (skip)
 
-    token = strtok(NULL, ",");
+    token = next_token(&ptr);
     if (!token)
         return false; // Longitude (skip)
 
-    token = strtok(NULL, ",");
+    token = next_token(&ptr);
     if (!token)
         return false; // Lon direction (skip)
 
-    token = strtok(NULL, ",");
+    token = next_token(&ptr);
     if (!token)
         return false;
     gps_data.fix_quality = atoi(token); // Fix quality
 
-    token = strtok(NULL, ",");
+    token = next_token(&ptr);
     if (!token)
         return false;
     gps_data.satellites = atoi(token); // Number of satellites
 
-    token = strtok(NULL, ",");
+    token = next_token(&ptr);
     if (!token)
         return false;
     gps_data.hdop = atof(token); // Horizontal DOP
 
-    token = strtok(NULL, ",");
+    token = next_token(&ptr);
     if (!token)
         return false;
     gps_data.altitude = atof(token); // Altitude above MSL

@@ -445,15 +445,7 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-  if (huart->Instance == USART1)
-  {
-    extern uint8_t gps_rx_char;
-    GPS_ProcessChar(gps_rx_char);
-    HAL_UART_Receive_IT(&huart1, &gps_rx_char, 1);
-  }
-}
+// DMA is now used for GPS UART reception - no callback needed
 
 /* USER CODE END 4 */
 
