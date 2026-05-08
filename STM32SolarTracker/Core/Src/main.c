@@ -22,7 +22,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "gps_module.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -136,6 +136,9 @@ int main(void)
   MX_TIM1_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
+  
+  /* Initialize GPS Module */
+  GPS_Init();
 
   /* USER CODE END 2 */
 
@@ -498,7 +501,7 @@ void StartGpsTask(void *argument)
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+    GPS_Task();
   }
   /* USER CODE END StartGpsTask */
 }
