@@ -160,7 +160,7 @@ int main(void)
 
   /* Create the queue(s) */
   /* creation of gpsRxQueue */
-  gpsRxQueueHandle = osMessageQueueNew (32, sizeof(uint8_t), &gpsRxQueue_attributes);
+  gpsRxQueueHandle = osMessageQueueNew (256, sizeof(uint8_t), &gpsRxQueue_attributes);
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */

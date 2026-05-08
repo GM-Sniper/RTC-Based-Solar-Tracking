@@ -29,8 +29,8 @@ uint8_t gps_rx_char = 0;
 /* ============= Forward Declarations ============= */
 static bool parse_nmea_rmc(const char *sentence);
 static bool parse_nmea_gga(const char *sentence);
-static uint8_t calculate_checksum(const char *sentence);
 static bool validate_checksum(const char *sentence);
+static bool get_nmea_field(const char *sentence, uint8_t field_index, char *out, size_t out_size);
 static float parse_coordinate(const char *coord_str, char direction);
 static bool parse_utc_time(const char *time_str);
 static bool parse_utc_date(const char *date_str);
@@ -159,8 +159,6 @@ void GPS_Task(void)
         GPS_PrintStatus();
         last_print = current_tick;
     }
-    
-    osDelay(100);  // Yield to other tasks
 }
 
 /* ============= Private Functions ============= */
@@ -175,60 +173,44 @@ static bool parse_nmea_rmc(const char *sentence)
         GPS_DebugPrint("[RMC] Checksum failed\r\n");
         return false;
     }
-    
-    char line[GPS_LINE_BUFFER_SIZE];
-    strncpy(line, sentence, GPS_LINE_BUFFER_SIZE - 1);
-    
-    // Remove checksum
-    char *checksum_pos = strchr(line, '*');
-    if (checksum_pos) *checksum_pos = '\0';
-    
-    // Parse fields
-    char *token = strtok(line, ",");
-    if (!token) return false;  // $GPRMC
-    
-    token = strtok(NULL, ",");
-    if (!token) return false;
-    parse_utc_time(token);  // hhmmss.ss
-    
-    token = strtok(NULL, ",");
-    if (!token) return false;
-    gps_data.valid_fix = (token[0] == 'A');  // A=valid, V=invalid
-    
-    token = strtok(NULL, ",");
-    if (!token) return false;
-    char lat_str[16];
-    strncpy(lat_str, token, 15);
-    
-    token = strtok(NULL, ",");
-    if (!token) return false;
-    char lat_dir = token[0];
-    
-    token = strtok(NULL, ",");
-    if (!token) return false;
-    char lon_str[16];
-    strncpy(lon_str, token, 15);
-    
-    token = strtok(NULL, ",");
-    if (!token) return false;
-    char lon_dir = token[0];
-    
-    token = strtok(NULL, ",");
-    if (!token) return false;
-    gps_data.speed_knots = atof(token);  // Speed in knots
-    
-    token = strtok(NULL, ",");
-    if (!token) return false;
-    gps_data.course = atof(token);  // Course over ground
-    
-    token = strtok(NULL, ",");
-    if (!token) return false;
-    parse_utc_date(token);  // Date in ddmmyy format
-    
-    // Convert coordinates
-    gps_data.latitude = parse_coordinate(lat_str, lat_dir);
-    gps_data.longitude = parse_coordinate(lon_str, lon_dir);
-    
+
+    char time_str[16] = {0};
+    char status_str[4] = {0};
+    char lat_str[16] = {0};
+    char lat_dir_str[4] = {0};
+    char lon_str[16] = {0};
+    char lon_dir_str[4] = {0};
+    char speed_str[16] = {0};
+    char course_str[16] = {0};
+    char date_str[16] = {0};
+
+    if (!get_nmea_field(sentence, 1, time_str, sizeof(time_str))) return false;
+    if (!get_nmea_field(sentence, 2, status_str, sizeof(status_str))) return false;
+    if (!get_nmea_field(sentence, 3, lat_str, sizeof(lat_str))) return false;
+    if (!get_nmea_field(sentence, 4, lat_dir_str, sizeof(lat_dir_str))) return false;
+    if (!get_nmea_field(sentence, 5, lon_str, sizeof(lon_str))) return false;
+    if (!get_nmea_field(sentence, 6, lon_dir_str, sizeof(lon_dir_str))) return false;
+    if (!get_nmea_field(sentence, 7, speed_str, sizeof(speed_str))) return false;
+    if (!get_nmea_field(sentence, 8, course_str, sizeof(course_str))) return false;
+    if (!get_nmea_field(sentence, 9, date_str, sizeof(date_str))) return false;
+
+    if (!parse_utc_time(time_str)) return false;
+    if (!parse_utc_date(date_str)) return false;
+
+    gps_data.valid_fix = (status_str[0] == 'A');  // A=valid, V=invalid
+
+    gps_data.speed_knots = (speed_str[0] != '\0') ? atof(speed_str) : 0.0f;
+    gps_data.course = (course_str[0] != '\0') ? atof(course_str) : 0.0f;
+
+    if (gps_data.valid_fix && lat_str[0] != '\0' && lon_str[0] != '\0' &&
+        lat_dir_str[0] != '\0' && lon_dir_str[0] != '\0') {
+        gps_data.latitude = parse_coordinate(lat_str, lat_dir_str[0]);
+        gps_data.longitude = parse_coordinate(lon_str, lon_dir_str[0]);
+    } else {
+        gps_data.latitude = 0.0f;
+        gps_data.longitude = 0.0f;
+    }
+
     return true;
 }
 
@@ -242,50 +224,66 @@ static bool parse_nmea_gga(const char *sentence)
         GPS_DebugPrint("[GGA] Checksum failed\r\n");
         return false;
     }
-    
-    char line[GPS_LINE_BUFFER_SIZE];
-    strncpy(line, sentence, GPS_LINE_BUFFER_SIZE - 1);
-    
-    // Remove checksum
-    char *checksum_pos = strchr(line, '*');
-    if (checksum_pos) *checksum_pos = '\0';
-    
-    // Parse fields
-    char *token = strtok(line, ",");
-    if (!token) return false;  // $GPGGA
-    
-    token = strtok(NULL, ",");
-    if (!token) return false;  // Time (skip, already from RMC)
-    
-    token = strtok(NULL, ",");
-    if (!token) return false;  // Latitude (skip)
-    
-    token = strtok(NULL, ",");
-    if (!token) return false;  // Lat direction (skip)
-    
-    token = strtok(NULL, ",");
-    if (!token) return false;  // Longitude (skip)
-    
-    token = strtok(NULL, ",");
-    if (!token) return false;  // Lon direction (skip)
-    
-    token = strtok(NULL, ",");
-    if (!token) return false;
-    gps_data.fix_quality = atoi(token);  // Fix quality
-    
-    token = strtok(NULL, ",");
-    if (!token) return false;
-    gps_data.satellites = atoi(token);  // Number of satellites
-    
-    token = strtok(NULL, ",");
-    if (!token) return false;
-    gps_data.hdop = atof(token);  // Horizontal DOP
-    
-    token = strtok(NULL, ",");
-    if (!token) return false;
-    gps_data.altitude = atof(token);  // Altitude above MSL
-    
+
+    char fix_str[8] = {0};
+    char sats_str[8] = {0};
+    char hdop_str[16] = {0};
+    char alt_str[16] = {0};
+
+    if (!get_nmea_field(sentence, 6, fix_str, sizeof(fix_str))) return false;
+    if (!get_nmea_field(sentence, 7, sats_str, sizeof(sats_str))) return false;
+    if (!get_nmea_field(sentence, 8, hdop_str, sizeof(hdop_str))) return false;
+    if (!get_nmea_field(sentence, 9, alt_str, sizeof(alt_str))) return false;
+
+    gps_data.fix_quality = (fix_str[0] != '\0') ? (uint8_t)atoi(fix_str) : 0;
+    gps_data.satellites = (sats_str[0] != '\0') ? (uint8_t)atoi(sats_str) : 0;
+    gps_data.hdop = (hdop_str[0] != '\0') ? atof(hdop_str) : 0.0f;
+    gps_data.altitude = (alt_str[0] != '\0') ? atof(alt_str) : 0.0f;
+
     return true;
+}
+
+/**
+ * @brief Get NMEA field by index while preserving empty fields.
+ * field_index: 0=$GPRMC/$GPGGA, 1=time, 2=status, ...
+ */
+static bool get_nmea_field(const char *sentence, uint8_t field_index, char *out, size_t out_size)
+{
+    if (!sentence || !out || out_size == 0) return false;
+
+    const char *p = sentence;
+    if (*p == '$') p++;
+
+    uint8_t current_field = 0;
+    const char *field_start = p;
+
+    while (*p != '\0') {
+        if (*p == ',' || *p == '*' || *p == '\r' || *p == '\n') {
+            if (current_field == field_index) {
+                size_t len = (size_t)(p - field_start);
+                if (len >= out_size) len = out_size - 1;
+                memcpy(out, field_start, len);
+                out[len] = '\0';
+                return true;
+            }
+
+            if (*p == '*') break;
+
+            current_field++;
+            field_start = p + 1;
+        }
+        p++;
+    }
+
+    if (current_field == field_index) {
+        size_t len = (size_t)(p - field_start);
+        if (len >= out_size) len = out_size - 1;
+        memcpy(out, field_start, len);
+        out[len] = '\0';
+        return true;
+    }
+
+    return false;
 }
 
 /**
