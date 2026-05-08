@@ -23,6 +23,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "gps_module.h"
+extern uint8_t gps_rx_char;
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -498,9 +499,16 @@ void StartServoTask(void *argument)
 void StartGpsTask(void *argument)
 {
   /* USER CODE BEGIN StartGpsTask */
-  /* Infinite loop */
+  uint8_t rx_char = 0;
   for(;;)
   {
+    if (gpsRxQueueHandle != NULL && osMessageQueueGet(gpsRxQueueHandle, &rx_char, NULL, 100) == osOK) {
+      GPS_ProcessChar(rx_char);
+      while (osMessageQueueGet(gpsRxQueueHandle, &rx_char, NULL, 0) == osOK) {
+        GPS_ProcessChar(rx_char);
+      }
+    }
+
     GPS_Task();
   }
   /* USER CODE END StartGpsTask */
@@ -544,6 +552,23 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   /* USER CODE BEGIN Callback 1 */
 
   /* USER CODE END Callback 1 */
+}
+
+/**
+  * @brief UART RX Complete Callback
+  * Enqueue received GPS byte to RTOS message queue and re-arm RX interrupt.
+  */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == USART1)
+  {
+    if (gpsRxQueueHandle != NULL) {
+      (void)osMessageQueuePut(gpsRxQueueHandle, &gps_rx_char, 0, 0);
+    }
+
+    /* Restart UART receive (non-blocking interrupt) */
+    HAL_UART_Receive_IT(&huart1, &gps_rx_char, 1);
+  }
 }
 
 /**
